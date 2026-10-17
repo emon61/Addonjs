@@ -48,19 +48,96 @@ const SITES = {
     search: (q, p) => `/search/?query=${enc(q)}&page=${p}`,
     item: "div.video-box", hrefRe: /\/watch\//, pageSize: 36,
   },
+  "ep-new": {
+    prefix: "ep", name: "Eporner", base: "https://www.eporner.com",
+    list: (p) => `/api/v2/video/search/?query=all&per_page=30&page=${p}&thumbsize=big&order=latest&format=json`,
+    search: (q, p) => `/api/v2/video/search/?query=${enc(q)}&per_page=30&page=${p}&thumbsize=big&order=top-weekly&format=json`,
+    item: "x", pageSize: 30,
+    parse: (j) =>
+      (j.videos || []).map((v) => ({
+        path: new URL(v.url).pathname,
+        title: v.title,
+        poster: v.default_thumb && v.default_thumb.src,
+      })),
+  },
+  "xn-new": {
+    prefix: "xn", name: "XNXX", base: "https://www.xnxx.com",
+    list: (p) => (p === 1 ? "/" : `/new/${p}`),
+    search: (q, p) => `/search/${enc(q)}/${p - 1}`,
+    item: "div.thumb-block", hrefRe: /^\/video-/, pageSize: 27,
+  },
+  "sb-new": {
+    prefix: "sb", name: "SpankBang", base: "https://spankbang.com",
+    list: (p) => (p === 1 ? "/new_videos/" : `/new_videos/${p}/`),
+    search: (q, p) => `/s/${enc(q).replace(/%20/g, "+")}/${p}/`,
+    item: "div.video-item", hrefRe: /^\/[a-z0-9]+\/video\//i, pageSize: 40,
+  },
+  "t8-new": {
+    prefix: "t8", name: "Tube8", base: "https://www.tube8.com",
+    list: (p) => `/newest.html?page=${p}`,
+    search: (q, p) => `/searches.html?q=${enc(q)}&page=${p}`,
+    item: "figure.video_box, div.gridVideoBlock, li.videoblock_list, div.video-box",
+    hrefRe: /porn-video|\/video\/|\/\d{6,}/, pageSize: 32,
+  },
+  "mav-new": {
+    prefix: "mav", name: "MissAV", base: "https://missav.ws",
+    list: (p) => `/en/new?page=${p}`,
+    search: (q, p) => `/en/search/${enc(q)}?page=${p}`,
+    item: "div.thumbnail", hrefRe: /\/[a-z0-9]{2,8}-\d{2,5}(-[a-z-]+)?\/?$/i, pageSize: 12,
+  },
+  "bg-new": {
+    prefix: "bg", name: "Beeg", base: "https://beeg.com",
+    list: () => "/",
+    search: () => "/",
+    item: "div", hrefRe: /^$/, pageSize: 48,
+    custom: async (search, page, site) => {
+      const off = (page - 1) * 48;
+      const api = search
+        ? `https://store.externulls.com/facts/search?query=${enc(search)}&limit=48&offset=${off}`
+        : `https://store.externulls.com/facts/tag?slug=index&limit=48&offset=${off}`;
+      const r = await fetch(api, {
+        headers: { "User-Agent": UA, Accept: "application/json", Origin: "https://beeg.com", Referer: "https://beeg.com/" },
+      });
+      if (!r.ok) throw new Error("Beeg API HTTP " + r.status);
+      const data = await r.json();
+      const arr = Array.isArray(data) ? data : data.items || data.data || [];
+      const out = [];
+      for (const e of arr) {
+        const f = e.file || e;
+        const fid = f.id || e.fc_file_id || e.id;
+        if (!fid) continue;
+        const name = f.stuff?.sf_name || f.data?.[0]?.cd_value || e.title || "Beeg video";
+        const poster = wrap(`https://thumbs.externulls.com/videos/${fid}/0.webp?size=480x270`, "https://beeg.com/");
+        const id = makeId(site, `/-${fid}`);
+        remember(id, { name, poster });
+        out.push({ id, type: "movie", name, poster });
+      }
+      console.log(`Beeg: ${out.length} items`);
+      return out;
+    },
+  },
 };
 const BY_PREFIX = Object.fromEntries(Object.values(SITES).map((s) => [s.prefix, s]));
 
+// Themed rows: same site and scraper, but the "newest" list is a fixed search.
+function themed(key, label, term) {
+  const b = SITES[key];
+  SITES[`${b.prefix}-${term}`] = { ...b, catName: label, list: (p) => b.search(term, p) };
+}
+themed("ep-new", "Eporner - Hentai", "hentai");
+themed("xh-new", "xHamster - Hentai", "hentai");
+themed("ph-new", "Pornhub - Hentai", "hentai");
+
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.1.1",
+  version: "2.4.0",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
   types: ["movie"],
   idPrefixes: Object.values(SITES).map((s) => s.prefix + ":"),
   catalogs: Object.entries(SITES).map(([id, s]) => ({
-    type: "movie", id, name: `${s.name} - Newest`,
+    type: "movie", id, name: s.catName || `${s.name} - Newest`,
     extra: [{ name: "search" }, { name: "skip" }],
   })),
   behaviorHints: { adult: true },
@@ -95,9 +172,21 @@ function pickPoster(img, site) {
 }
 
 async function fetchVideos(site, { search, page }) {
+  if (site.custom) return site.custom(search, page, site);
   const path = search ? site.search(search, page) : site.list(page);
   const res = await fetch(site.base + path, { headers: HEADERS });
   if (!res.ok) console.error(`${site.name}: HTTP ${res.status} for ${path}`);
+  if (site.parse) {
+    const rows = site.parse(await res.json());
+    const out = rows.map((r) => {
+      const id = makeId(site, r.path);
+      const poster = r.poster ? wrap(r.poster, site.base + "/") : undefined;
+      remember(id, { name: r.title, poster });
+      return { id, type: "movie", name: r.title, poster };
+    });
+    console.log(`${site.name}: ${out.length} items (${path})`);
+    return out;
+  }
   const $ = cheerio.load(await res.text());
   const items = [];
   const seen = new Set();
