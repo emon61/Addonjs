@@ -1,17 +1,19 @@
-const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
+const http = require("http");
+const { Readable } = require("stream");
+const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const { execFile } = require("child_process");
 const cheerio = require("cheerio");
 
 const BASE = "https://www.pornhub.com";
-const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-  Cookie: "accessAgeDisclaimerPH=1; platform=pc",
-};
+const PORT = process.env.PORT || 7000;
+const PUBLIC = (process.env.RENDER_EXTERNAL_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, "");
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const HEADERS = { "User-Agent": UA, Cookie: "accessAgeDisclaimerPH=1; platform=pc" };
 
 const manifest = {
   id: "community.ph.addon",
-  version: "1.0.0",
+  version: "1.0.2",
   name: "PH Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -35,8 +37,7 @@ async function fetchVideos({ search, page }) {
     ? `${BASE}/video/search?search=${encodeURIComponent(search)}&page=${page}`
     : `${BASE}/video?page=${page}`;
   const res = await fetch(url, { headers: HEADERS });
-  const html = await res.text();
-  const $ = cheerio.load(html);
+  const $ = cheerio.load(await res.text());
   const items = [];
   $("li.pcVideoListItem[data-video-vkey]").each((_, el) => {
     const $el = $(el);
@@ -45,9 +46,7 @@ async function fetchVideos({ search, page }) {
     const img = $el.find("img").first();
     const poster =
       img.attr("data-mediumthumb") || img.attr("data-src") || img.attr("src");
-    if (key && title) {
-      items.push({ id: `ph:${key}`, type: "movie", name: title, poster });
-    }
+    if (key && title) items.push({ id: `ph:${key}`, type: "movie", name: title, poster });
   });
   return items;
 }
@@ -56,8 +55,7 @@ builder.defineCatalogHandler(async ({ extra }) => {
   const skip = parseInt(extra?.skip || 0, 10);
   const page = Math.floor(skip / 32) + 1;
   try {
-    const metas = await fetchVideos({ search: extra?.search, page });
-    return { metas };
+    return { metas: await fetchVideos({ search: extra?.search, page }) };
   } catch (e) {
     console.error("catalog error:", e.message);
     return { metas: [] };
@@ -90,32 +88,74 @@ function ytdlpUrls(pageUrl) {
   });
 }
 
+const wrap = (u) => `${PUBLIC}/proxy?u=${Buffer.from(u).toString("base64url")}`;
+
 builder.defineStreamHandler(async ({ id }) => {
   const key = id.replace("ph:", "");
   const pageUrl = `${BASE}/view_video.php?viewkey=${key}`;
   try {
     const urls = await ytdlpUrls(pageUrl);
     return {
-      streams: urls.map((url) => ({
-        url,
+      streams: urls.slice(0, 1).map((url) => ({
+        url: wrap(url),
         name: "PH",
-        title: "Direct stream",
-        behaviorHints: { notWebReady: true },
+        title: "Stream (via server)",
       })),
     };
   } catch (e) {
     console.error("stream error:", e.message);
     return {
       streams: [
-        {
-          name: "PH error",
-          title: String(e.message).slice(0, 200),
-          externalUrl: pageUrl,
-        },
+        { name: "PH error", title: String(e.message).slice(0, 200), externalUrl: pageUrl },
       ],
     };
   }
 });
 
-serveHTTP(builder.getInterface(), { port: process.env.PORT || 7000 });
-console.log("Addon running: http://127.0.0.1:7000/manifest.json");
+async function handleProxy(req, res) {
+  try {
+    const u = new URL(req.url, "http://x").searchParams.get("u");
+    const target = Buffer.from(u, "base64url").toString();
+    const headers = { "User-Agent": UA, Referer: BASE + "/" };
+    if (req.headers.range) headers.Range = req.headers.range;
+    const up = await fetch(target, { headers });
+    const ct = up.headers.get("content-type") || "";
+    if (target.includes(".m3u8") || ct.includes("mpegurl")) {
+      const text = await up.text();
+      const base = new URL(target);
+      const out = text
+        .split("\n")
+        .map((line) => {
+          const t = line.trim();
+          if (!t) return line;
+          if (t.startsWith("#"))
+            return line.replace(/URI="([^"]+)"/g, (_, x) => `URI="${wrap(new URL(x, base).href)}"`);
+          return wrap(new URL(t, base).href);
+        })
+        .join("\n");
+      res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+      return res.end(out);
+    }
+    const h = {};
+    for (const k of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+      const v = up.headers.get(k);
+      if (v) h[k] = v;
+    }
+    res.writeHead(up.status, h);
+    Readable.fromWeb(up.body).pipe(res);
+  } catch (e) {
+    res.writeHead(502);
+    res.end(String(e.message));
+  }
+}
+
+const router = getRouter(builder.getInterface());
+http
+  .createServer((req, res) => {
+    if (req.url.startsWith("/proxy")) return handleProxy(req, res);
+    router(req, res, () => {
+      res.writeHead(404);
+      res.end();
+    });
+  })
+  .listen(PORT, () => console.log("Addon running on port " + PORT));
