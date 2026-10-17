@@ -52,7 +52,7 @@ const BY_PREFIX = Object.fromEntries(Object.values(SITES).map((s) => [s.prefix, 
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.0.0",
+  version: "2.0.1",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -79,6 +79,18 @@ function parseId(id) {
   const site = BY_PREFIX[id.slice(0, i)];
   const path = Buffer.from(id.slice(i + 1), "base64url").toString();
   return { site, path, url: site.base + path };
+}
+
+function pickPoster(img, site) {
+  const attrs = img.attr() || {};
+  const order = ["data-mediumthumb", "data-thumb_url", "data-original", "data-src", "data-lazy", "data-poster", "src"];
+  const vals = order.map((k) => attrs[k]).filter(Boolean);
+  for (const v of Object.values(attrs)) if (/\.(jpe?g|png|webp)/i.test(v)) vals.push(v);
+  for (const v of vals) {
+    if (!v || v.startsWith("data:")) continue;
+    try { return new URL(v, site.base).href; } catch {}
+  }
+  return undefined;
 }
 
 async function fetchVideos(site, { search, page }) {
@@ -110,11 +122,8 @@ async function fetchVideos(site, { search, page }) {
     }
     const img = $el.find("img").first();
     title = title || $el.find("[title]").first().attr("title") || img.attr("alt") || "Video";
-    let poster =
-      img.attr("data-mediumthumb") || img.attr("data-thumb_url") ||
-      img.attr("data-original") || img.attr("data-src") || img.attr("src");
-    if (poster && poster.startsWith("//")) poster = "https:" + poster;
-    if (poster && poster.startsWith("data:")) poster = undefined;
+    let poster = pickPoster(img, site);
+    if (poster) poster = wrap(poster, site.base + "/");
     const meta = { id, type: "movie", name: title.replace(/\s+/g, " ").trim(), poster };
     remember(id, { name: meta.name, poster });
     items.push(meta);
@@ -217,6 +226,7 @@ async function handleProxy(req, res) {
       const v = up.headers.get(k);
       if (v) h[k] = v;
     }
+    if ((h["content-type"] || "").startsWith("image/")) h["cache-control"] = "public, max-age=86400";
     res.writeHead(up.status, h);
     Readable.fromWeb(up.body).pipe(res);
   } catch (e) {
