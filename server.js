@@ -52,7 +52,7 @@ const BY_PREFIX = Object.fromEntries(Object.values(SITES).map((s) => [s.prefix, 
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.0.1",
+  version: "2.0.2",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -115,14 +115,28 @@ async function fetchVideos(site, { search, page }) {
     const id = makeId(site, vpath);
     if (seen.has(id)) return;
     seen.add(id);
+    const html = $el.html() || "";
+    const clean = (t) => (t || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const isDur = (t) => /^\d{1,2}:\d{2}(:\d{2})?$/.test(t);
     let title = "";
     for (const a of anchors) {
-      title = a.attr("title") || a.text().trim();
+      const cands = [a.attr("title"), a.attr("aria-label"), a.text()].map(clean);
+      title = cands.find((t) => t && !isDur(t)) || "";
       if (title) break;
     }
     const img = $el.find("img").first();
-    title = title || $el.find("[title]").first().attr("title") || img.attr("alt") || "Video";
+    if (!title) title = clean($el.find("[title]").first().attr("title"));
+    if (!title) title = clean(img.attr("alt"));
+    if (!title) {
+      const m = html.match(/alt="([^"]+)"/);
+      if (m) title = clean(m[1]);
+    }
+    if (!title || isDur(title)) title = "Video";
     let poster = pickPoster(img, site);
+    if (!poster) {
+      const m = html.match(/https?:\/\/[^"'\s]+?\.(?:jpe?g|png|webp)/i);
+      if (m) poster = m[0];
+    }
     if (poster) poster = wrap(poster, site.base + "/");
     const meta = { id, type: "movie", name: title.replace(/\s+/g, " ").trim(), poster };
     remember(id, { name: meta.name, poster });
