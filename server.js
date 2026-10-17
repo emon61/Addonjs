@@ -10,6 +10,7 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const HEADERS = {
   "User-Agent": UA,
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
   Cookie: "accessAgeDisclaimerPH=1; platform=pc; age_verified=1",
 };
@@ -25,7 +26,7 @@ const SITES = {
   },
   "xv-new": {
     prefix: "xv", name: "XVideos", base: "https://www.xvideos.com",
-    list: (p) => `/new/${p - 1}`,
+    list: (p) => (p === 1 ? "/" : `/new/${p - 1}`),
     search: (q, p) => `/?k=${enc(q)}&p=${p - 1}`,
     item: "div.thumb-block", hrefRe: /^\/video/, pageSize: 27,
   },
@@ -52,7 +53,7 @@ const BY_PREFIX = Object.fromEntries(Object.values(SITES).map((s) => [s.prefix, 
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.1.0",
+  version: "2.1.1",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -96,6 +97,7 @@ function pickPoster(img, site) {
 async function fetchVideos(site, { search, page }) {
   const path = search ? site.search(search, page) : site.list(page);
   const res = await fetch(site.base + path, { headers: HEADERS });
+  if (!res.ok) console.error(`${site.name}: HTTP ${res.status} for ${path}`);
   const $ = cheerio.load(await res.text());
   const items = [];
   const seen = new Set();
@@ -290,10 +292,41 @@ async function handleProxy(req, res) {
   }
 }
 
+async function handleDebug(req, res) {
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  try {
+    const c = new URL(req.url, "http://x").searchParams.get("c") || "";
+    const site = SITES[c];
+    if (!site) return res.end("Use /debug?c=" + Object.keys(SITES).join(" or /debug?c="));
+    const url = site.base + site.list(1);
+    const r = await fetch(url, { headers: HEADERS });
+    const text = await r.text();
+    const $ = cheerio.load(text);
+    res.end(
+      JSON.stringify(
+        {
+          url,
+          status: r.status,
+          finalUrl: r.url,
+          length: text.length,
+          itemsFound: $(site.item).length,
+          pageTitle: $("title").first().text().trim(),
+          sample: text.slice(0, 150).replace(/\s+/g, " "),
+        },
+        null,
+        1
+      )
+    );
+  } catch (e) {
+    res.end("fetch failed: " + e.message);
+  }
+}
+
 const router = getRouter(builder.getInterface());
 http
   .createServer((req, res) => {
     if (req.url.startsWith("/proxy")) return handleProxy(req, res);
+    if (req.url.startsWith("/debug")) return handleDebug(req, res);
     router(req, res, () => {
       res.writeHead(404);
       res.end();
