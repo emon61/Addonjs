@@ -1,0 +1,10 @@
+{
+  "name": "ph-stremio-addon",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}
