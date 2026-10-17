@@ -52,7 +52,7 @@ const BY_PREFIX = Object.fromEntries(Object.values(SITES).map((s) => [s.prefix, 
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.0.2",
+  version: "2.1.0",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -185,6 +185,47 @@ function ytdlpUrls(pageUrl) {
   });
 }
 
+function ytdlpJson(pageUrl) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "yt-dlp",
+      ["-J", "--no-playlist", pageUrl],
+      { timeout: 45000, maxBuffer: 20 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error((stderr || err.message || "unknown").trim()));
+        resolve(stdout);
+      }
+    );
+  });
+}
+
+const qcache = new Map();
+async function getQualities(pageUrl) {
+  const hit = qcache.get(pageUrl);
+  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return hit.v;
+  const info = JSON.parse(await ytdlpJson(pageUrl));
+  const byH = new Map();
+  for (const f of info.formats || []) {
+    if (!f.url || !f.height) continue;
+    if (f.vcodec === "none" || f.acodec === "none") continue;
+    if (/dash|mhtml|rtmp|ism/.test(f.protocol || "")) continue;
+    const cur = byH.get(f.height);
+    if (!cur || (f.tbr || 0) > (cur.tbr || 0)) byH.set(f.height, f);
+  }
+  let out = [...byH.values()]
+    .sort((a, b) => b.height - a.height)
+    .slice(0, 6)
+    .map((f) => ({
+      url: f.url,
+      label: `${f.height}p - ${/m3u8/.test(f.protocol || "") ? "HLS" : (f.ext || "video").toUpperCase()}`,
+    }));
+  if (!out.length && info.url) out = [{ url: info.url, label: "Best available" }];
+  if (!out.length) throw new Error("No playable formats found");
+  qcache.set(pageUrl, { t: Date.now(), v: out });
+  if (qcache.size > 200) qcache.delete(qcache.keys().next().value);
+  return out;
+}
+
 const wrap = (u, ref) =>
   `${PUBLIC}/proxy?u=${Buffer.from(u).toString("base64url")}&r=${Buffer.from(ref).toString("base64url")}`;
 
@@ -193,12 +234,12 @@ builder.defineStreamHandler(async ({ id }) => {
   try { parsed = parseId(id); } catch { return { streams: [] }; }
   const { site, url: pageUrl } = parsed;
   try {
-    const urls = await ytdlpUrls(pageUrl);
+    const list = await getQualities(pageUrl);
     return {
-      streams: urls.slice(0, 1).map((u) => ({
-        url: wrap(u, site.base + "/"),
+      streams: list.map((q) => ({
+        url: wrap(q.url, site.base + "/"),
         name: site.name,
-        title: "Stream (via server)",
+        title: q.label,
       })),
     };
   } catch (e) {
