@@ -82,8 +82,8 @@ function ytdlpUrls(pageUrl) {
       "yt-dlp",
       ["-g", "-f", "best[height<=1080]/best", pageUrl],
       { timeout: 30000 },
-      (err, stdout) => {
-        if (err) return reject(err);
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error((stderr || err.message || "unknown").trim()));
         resolve(stdout.split("\n").map((s) => s.trim()).filter(Boolean));
       }
     );
@@ -105,7 +105,15 @@ builder.defineStreamHandler(async ({ id }) => {
     };
   } catch (e) {
     console.error("stream error:", e.message);
-    return { streams: [] };
+    return {
+      streams: [
+        {
+          name: "PH error",
+          title: String(e.message).slice(0, 200),
+          externalUrl: pageUrl,
+        },
+      ],
+    };
   }
 });
 
