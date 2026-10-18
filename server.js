@@ -454,11 +454,50 @@ async function handleSelfTest(req, res) {
   res.end(log.join("\n"));
 }
 
+async function checkSite(key, site) {
+  const label = site.catName || `${site.name} - Newest`;
+  try {
+    let count = 0;
+    if (site.custom) {
+      count = (await site.custom(null, 1, site)).length;
+    } else {
+      const r = await fetch(site.base + site.list(1), {
+        headers: HEADERS,
+        signal: AbortSignal.timeout(20000),
+      });
+      const text = await r.text();
+      const title = (cheerio.load(text)("title").first().text() || "").trim();
+      const blocked =
+        [403, 429, 503].includes(r.status) ||
+        /just a moment|attention required|cloudflare|access denied|captcha/i.test(title);
+      if (blocked) return `BLOCKED  ${label}: HTTP ${r.status}, "${title.slice(0, 40)}"`;
+      if (site.parse) {
+        try { count = site.parse(JSON.parse(text)).length; } catch { count = 0; }
+      } else {
+        count = cheerio.load(text)(site.item).length;
+      }
+      if (!count) return `EMPTY    ${label}: loaded (HTTP ${r.status}) but 0 videos found`;
+    }
+    if (!count) return `EMPTY    ${label}: 0 videos found`;
+    return `OK       ${label}: ${count} videos`;
+  } catch (e) {
+    return `ERROR    ${label}: ${String(e.message).slice(0, 80)}`;
+  }
+}
+
+async function handleStatus(req, res) {
+  const lines = await Promise.all(Object.entries(SITES).map(([k, v]) => checkSite(k, v)));
+  lines.sort();
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("Adult Addon health check\n\n" + lines.join("\n") + "\n");
+}
+
 const router = getRouter(builder.getInterface());
 http
   .createServer((req, res) => {
     if (req.url.startsWith("/proxy")) return handleProxy(req, res);
     if (req.url.startsWith("/debug")) return handleDebug(req, res);
+    if (req.url.startsWith("/status")) return handleStatus(req, res);
     if (req.url.startsWith("/selftest")) return handleSelfTest(req, res);
     router(req, res, () => {
       res.writeHead(404);
