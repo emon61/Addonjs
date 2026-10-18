@@ -130,7 +130,7 @@ themed("ph-new", "Pornhub - Hentai", "hentai");
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.4.0",
+  version: "2.4.1",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -411,11 +411,55 @@ async function handleDebug(req, res) {
   }
 }
 
+async function handleSelfTest(req, res) {
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  const log = [];
+  const say = (k, v) => log.push(`${k}: ${v}`);
+  try {
+    const c = new URL(req.url, "http://x").searchParams.get("c") || "ph-new";
+    const site = SITES[c];
+    if (!site) return res.end("Use /selftest?c=" + Object.keys(SITES).join(" or /selftest?c="));
+    let t = Date.now();
+    const items = await fetchVideos(site, { page: 1 });
+    say("1 catalog", `${items.length} items in ${Date.now() - t}ms`);
+    if (!items.length) return res.end(log.join("\n") + "\nSTOP: catalog is empty");
+    const { url: pageUrl } = parseId(items[0].id);
+    say("video", items[0].name);
+    t = Date.now();
+    const qs = await getQualities(pageUrl);
+    say("2 qualities", `${qs.length} found in ${Date.now() - t}ms: ${qs.map((q) => q.label).join(" | ")}`);
+    for (const q of qs.slice(0, 2)) {
+      t = Date.now();
+      const r = await fetch(q.url, { headers: { "User-Agent": UA, Referer: site.base + "/" } });
+      const ct = r.headers.get("content-type") || "";
+      const isText = /mpegurl|text|json/.test(ct) || q.url.includes(".m3u8");
+      let full = "";
+      if (isText) full = await r.text();
+      say(
+        `3 open ${q.label}`,
+        `HTTP ${r.status}, ${ct || "no type"}, ${r.headers.get("content-length") || "?"} bytes, ${Date.now() - t}ms` +
+          (isText ? "\n   starts: " + full.slice(0, 160).replace(/\s+/g, " ") : "")
+      );
+      if (!isText && r.body) await r.body.cancel();
+      const line = full.split("\n").map((x) => x.trim()).find((x) => x && !x.startsWith("#"));
+      if (line) {
+        const sr = await fetch(new URL(line, q.url).href, { headers: { "User-Agent": UA, Referer: site.base + "/" } });
+        say("   first playlist entry", `HTTP ${sr.status}, ${sr.headers.get("content-type") || "no type"}`);
+        if (sr.body) await sr.body.cancel();
+      }
+    }
+  } catch (e) {
+    say("ERROR", String(e.message).slice(0, 300));
+  }
+  res.end(log.join("\n"));
+}
+
 const router = getRouter(builder.getInterface());
 http
   .createServer((req, res) => {
     if (req.url.startsWith("/proxy")) return handleProxy(req, res);
     if (req.url.startsWith("/debug")) return handleDebug(req, res);
+    if (req.url.startsWith("/selftest")) return handleSelfTest(req, res);
     router(req, res, () => {
       res.writeHead(404);
       res.end();
