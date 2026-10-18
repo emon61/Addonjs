@@ -66,24 +66,12 @@ const SITES = {
     search: (q, p) => `/search/${enc(q)}/${p - 1}`,
     item: "div.thumb-block", hrefRe: /^\/video-/, pageSize: 27,
   },
-  "sb-new": {
-    prefix: "sb", name: "SpankBang", base: "https://spankbang.com",
-    list: (p) => (p === 1 ? "/new_videos/" : `/new_videos/${p}/`),
-    search: (q, p) => `/s/${enc(q).replace(/%20/g, "+")}/${p}/`,
-    item: "div.video-item", hrefRe: /^\/[a-z0-9]+\/video\//i, pageSize: 40,
-  },
   "t8-new": {
     prefix: "t8", name: "Tube8", base: "https://www.tube8.com",
     list: (p) => `/newest.html?page=${p}`,
     search: (q, p) => `/searches.html?q=${enc(q)}&page=${p}`,
     item: "figure.video_box, div.gridVideoBlock, li.videoblock_list, div.video-box",
     hrefRe: /porn-video|\/video\/|\/\d{6,}/, pageSize: 32,
-  },
-  "mav-new": {
-    prefix: "mav", name: "MissAV", base: "https://missav.ws",
-    list: (p) => `/en/new?page=${p}`,
-    search: (q, p) => `/en/search/${enc(q)}?page=${p}`,
-    item: "div.thumbnail", hrefRe: /\/[a-z0-9]{2,8}-\d{2,5}(-[a-z-]+)?\/?$/i, pageSize: 12,
   },
   "bg-new": {
     prefix: "bg", name: "Beeg", base: "https://beeg.com",
@@ -124,13 +112,15 @@ function themed(key, label, term) {
   const b = SITES[key];
   SITES[`${b.prefix}-${term}`] = { ...b, catName: label, list: (p) => b.search(term, p) };
 }
-themed("ep-new", "Eporner - Hentai", "hentai");
-themed("xh-new", "xHamster - Hentai", "hentai");
-themed("ph-new", "Pornhub - Hentai", "hentai");
+themed("ph-new", "Pornhub - Japanese", "japanese");
+themed("xv-new", "XVideos - Japanese", "japanese");
+themed("xh-new", "xHamster - Japanese", "japanese");
+themed("ep-new", "Eporner - Japanese", "japanese");
+themed("xn-new", "XNXX - Japanese", "japanese");
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.4.1",
+  version: "2.6.1",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -169,6 +159,58 @@ function pickPoster(img, site) {
     try { return new URL(v, site.base).href; } catch {}
   }
   return undefined;
+}
+
+function scrapeByAnchors($, site) {
+  const clean = (t) => (t || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const isDur = (t) => /^\d{1,2}:\d{2}(:\d{2})?$/.test(t);
+  const matches = (href) => href && site.hrefRe.test(href);
+  const out = [];
+  const seen = new Set();
+  $("a[href]").each((_, a) => {
+    const href = $(a).attr("href");
+    if (!matches(href)) return;
+    let u;
+    try { u = new URL(href, site.base); } catch { return; }
+    const vpath = u.pathname + u.search;
+    if (seen.has(vpath)) return;
+    seen.add(vpath);
+    let box = $(a);
+    let img = box.find("img").first();
+    for (let i = 0; i < 3; i++) {
+      const up = box.parent();
+      if (!up.length) break;
+      const hrefs = new Set();
+      up.find("a[href]").each((_, x) => {
+        const h = $(x).attr("href");
+        if (matches(h)) hrefs.add(h.split("#")[0]);
+      });
+      if (hrefs.size > 1) break;
+      box = up;
+      if (!img.length) img = box.find("img").first();
+    }
+    const html = box.html() || "";
+    let title = "";
+    box.find("a[href]").each((_, x) => {
+      if (title || !matches($(x).attr("href"))) return;
+      const c = [$(x).attr("title"), $(x).attr("aria-label"), $(x).text()]
+        .map(clean)
+        .find((t) => t && !isDur(t));
+      if (c) title = c;
+    });
+    if (!title) title = clean(img.attr("alt")) || clean(box.find("[title]").first().attr("title"));
+    if (!title || isDur(title)) title = "Video";
+    let poster = pickPoster(img, site);
+    if (!poster) {
+      const m = html.match(/https?:\/\/[^"'\s]+?\.(?:jpe?g|png|webp)/i);
+      if (m) poster = m[0];
+    }
+    if (poster) poster = wrap(poster, site.base + "/");
+    const id = makeId(site, vpath);
+    remember(id, { name: title, poster });
+    out.push({ id, type: "movie", name: title, poster });
+  });
+  return out;
 }
 
 async function fetchVideos(site, { search, page }) {
@@ -233,6 +275,13 @@ async function fetchVideos(site, { search, page }) {
     remember(id, { name: meta.name, poster });
     items.push(meta);
   });
+  if (items.length < 5) {
+    const alt = scrapeByAnchors($, site);
+    if (alt.length > items.length) {
+      console.log(`${site.name}: fallback found ${alt.length} items (${path})`);
+      return alt;
+    }
+  }
   console.log(`${site.name}: ${items.length} items (${path})`);
   return items;
 }
@@ -474,7 +523,9 @@ async function checkSite(key, site) {
       if (site.parse) {
         try { count = site.parse(JSON.parse(text)).length; } catch { count = 0; }
       } else {
-        count = cheerio.load(text)(site.item).length;
+        const $s = cheerio.load(text);
+        count = $s(site.item).length;
+        if (count < 5) count = Math.max(count, scrapeByAnchors($s, site).length);
       }
       if (!count) return `EMPTY    ${label}: loaded (HTTP ${r.status}) but 0 videos found`;
     }
