@@ -120,7 +120,7 @@ themed("xn-new", "XNXX - Japanese", "japanese");
 
 const manifest = {
   id: "community.multi.adult.addon",
-  version: "2.6.1",
+  version: "2.7.0",
   name: "Adult Addon",
   description: "Browse, search and stream adult videos (18+)",
   resources: ["catalog", "meta", "stream"],
@@ -286,13 +286,23 @@ async function fetchVideos(site, { search, page }) {
   return items;
 }
 
+const catCache = new Map();
+
 builder.defineCatalogHandler(async ({ id, extra }) => {
   const site = SITES[id];
   if (!site) return { metas: [] };
   const skip = parseInt(extra?.skip || 0, 10);
   const page = Math.floor(skip / site.pageSize) + 1;
   try {
-    return { metas: await fetchVideos(site, { search: extra?.search, page }) };
+    const ck = `${id}|${extra?.search || ""}|${page}`;
+    const hit = catCache.get(ck);
+    if (hit && Date.now() - hit.t < 10 * 60 * 1000) return { metas: hit.v };
+    const metas = await fetchVideos(site, { search: extra?.search, page });
+    if (metas.length) {
+      catCache.set(ck, { t: Date.now(), v: metas });
+      if (catCache.size > 300) catCache.delete(catCache.keys().next().value);
+    }
+    return { metas };
   } catch (e) {
     console.error(`catalog error (${site.name}):`, e.message);
     return { metas: [] };
@@ -390,11 +400,33 @@ builder.defineStreamHandler(async ({ id }) => {
   }
 });
 
+const imgCache = new Map();
+let imgBytes = 0;
+const IMG_MAX = 60 * 1024 * 1024;
+function imgPut(k, v) {
+  imgCache.set(k, v);
+  imgBytes += v.buf.length;
+  while (imgBytes > IMG_MAX) {
+    const [fk, fv] = imgCache.entries().next().value;
+    imgCache.delete(fk);
+    imgBytes -= fv.buf.length;
+  }
+}
+
 async function handleProxy(req, res) {
   try {
     const q = new URL(req.url, "http://x").searchParams;
     const target = Buffer.from(q.get("u"), "base64url").toString();
     const ref = Buffer.from(q.get("r") || "", "base64url").toString();
+    const cached = imgCache.get(req.url);
+    if (cached) {
+      res.writeHead(200, {
+        "content-type": cached.type,
+        "content-length": cached.buf.length,
+        "cache-control": "public, max-age=86400",
+      });
+      return res.end(cached.buf);
+    }
     const headers = { "User-Agent": UA };
     if (ref) headers.Referer = ref;
     if (req.headers.range) headers.Range = req.headers.range;
@@ -421,7 +453,19 @@ async function handleProxy(req, res) {
       const v = up.headers.get(k);
       if (v) h[k] = v;
     }
-    if ((h["content-type"] || "").startsWith("image/")) h["cache-control"] = "public, max-age=86400";
+    if ((h["content-type"] || "").startsWith("image/")) {
+      h["cache-control"] = "public, max-age=86400";
+      if (up.ok) {
+        const buf = Buffer.from(await up.arrayBuffer());
+        imgPut(req.url, { type: h["content-type"], buf });
+        res.writeHead(200, {
+          "content-type": h["content-type"],
+          "content-length": buf.length,
+          "cache-control": h["cache-control"],
+        });
+        return res.end(buf);
+      }
+    }
     res.writeHead(up.status, h);
     Readable.fromWeb(up.body).pipe(res);
   } catch (e) {
@@ -542,6 +586,18 @@ async function handleStatus(req, res) {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Adult Addon health check\n\n" + lines.join("\n") + "\n");
 }
+
+async function warm() {
+  for (const [id, site] of Object.entries(SITES)) {
+    try {
+      const metas = await fetchVideos(site, { page: 1 });
+      if (metas.length) catCache.set(`${id}||1`, { t: Date.now(), v: metas });
+    } catch {}
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+setTimeout(warm, 5000);
+setInterval(warm, 8 * 60 * 1000);
 
 const router = getRouter(builder.getInterface());
 http
